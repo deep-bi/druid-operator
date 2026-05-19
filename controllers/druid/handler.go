@@ -1433,7 +1433,7 @@ func verifyDruidSpec(drd *v1alpha1.Druid) error {
 	if errorMsg == "" {
 		return nil
 	} else {
-		return fmt.Errorf(errorMsg)
+		return fmt.Errorf("%s", errorMsg)
 	}
 }
 
