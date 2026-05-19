@@ -374,8 +374,8 @@ bool
 </td>
 <td>
 <em>(Optional)</em>
-<p>DisablePVCAnnotationUpdate When set to true, operator will not patch PVC annotations when VolumeClaimTemplate annotations are updated.
-When disabled (false), updating VolumeClaimTemplate annotations will patch existing PVCs and recreate the StatefulSet.</p>
+<p>DisablePVCUpdates When set to true, operator will not patch PVCs when VolumeClaimTemplate annotations or volumeAttributeClassName are updated.
+When disabled (false), updating VolumeClaimTemplate annotations or volumeAttributeClassName will patch existing PVCs and recreate the StatefulSet.</p>
 </td>
 </tr>
 <tr>
@@ -2217,8 +2217,8 @@ bool
 </td>
 <td>
 <em>(Optional)</em>
-<p>DisablePVCAnnotationUpdate When set to true, operator will not patch PVC annotations when VolumeClaimTemplate annotations are updated.
-When disabled (false), updating VolumeClaimTemplate annotations will patch existing PVCs and recreate the StatefulSet.</p>
+<p>DisablePVCUpdates When set to true, operator will not patch PVCs when VolumeClaimTemplate annotations or volumeAttributeClassName are updated.
+When disabled (false), updating VolumeClaimTemplate annotations or volumeAttributeClassName will patch existing PVCs and recreate the StatefulSet.</p>
 </td>
 </tr>
 <tr>
