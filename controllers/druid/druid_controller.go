@@ -96,9 +96,9 @@ func (r *DruidReconciler) Reconcile(ctx context.Context, request reconcile.Reque
 	}
 
 	// Update Druid Dynamic Configs
-	if err := updateDruidDynamicConfigs(ctx, r.Client, instance, emitEvent); err != nil {
-		return ctrl.Result{}, err
-	}
+	// if err := updateDruidDynamicConfigs(ctx, r.Client, instance, emitEvent); err != nil {
+	// 	return ctrl.Result{}, err
+	// }
 
 	// If both operations succeed, requeue after specified wait time
 	return ctrl.Result{RequeueAfter: r.ReconcileWait}, nil
