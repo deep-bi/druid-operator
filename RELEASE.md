@@ -5,13 +5,16 @@
 - Access to build server (`root@65.109.2.88`)
 - Access to helm repo (`deep-bi/druid-operator-helm-repo`)
 
+## Workflow
+All work happens on `master` (trunk-based). Feature/fix branches are merged to `master` via PR. Tags are cut directly from `master`. No long-lived release branches.
+
 ## Steps
 
-### 1. Prepare the release branch
+### 1. Merge changes to master
 ```bash
+# Work on feature/fix branches, merge to master via PR
 git checkout master
-git checkout -b release/<version>
-# cherry-pick or merge feature branches
+git pull origin master
 ```
 
 ### 2. Regenerate artifacts
@@ -33,19 +36,22 @@ In `chart/values.yaml`:
 
 ### 4. Build and push the Docker image
 ```bash
-# Push branch to GitHub
-git push origin release/<version>
-
 # Build on remote server
 ssh root@65.109.2.88
 cd /tmp && rm -rf druid-operator
-git clone -b release/<version> --depth 1 https://github.com/deep-bi/druid-operator.git
+git clone -b master --depth 1 https://github.com/deep-bi/druid-operator.git
 cd druid-operator
 docker build -t deepbi/druid-operator:<tag> .
 docker push deepbi/druid-operator:<tag>
 ```
 
-### 5. Package and publish the Helm chart
+### 5. Tag the release
+```bash
+git tag <tag>
+git push origin <tag>
+```
+
+### 6. Package and publish the Helm chart
 ```bash
 # Clone helm repo
 git clone git@github.com:deep-bi/druid-operator-helm-repo.git /tmp/druid-operator-helm-repo
@@ -61,12 +67,6 @@ helm repo index . --url https://charts.deep.bi
 git add -A
 git commit -m "release druid-operator chart <chart-version> (appVersion <tag>)"
 git push origin main
-```
-
-### 6. Tag the release
-```bash
-git tag <tag>
-git push origin <tag>
 ```
 
 ## Cherry-picking from upstream
