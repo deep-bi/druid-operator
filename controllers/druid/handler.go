@@ -38,7 +38,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -763,28 +762,6 @@ func isObjFullyDeployed(ctx context.Context, sdk client.Client, nodeSpec v1alpha
 	return false, nil
 }
 
-// desVolumeClaimTemplateSize: the druid CR holds this value for a sts volumeclaimtemplate
-// currVolumeClaimTemplateSize: the sts owned by druid CR holds this value in volumeclaimtemplate
-// pvcSize: the pvc referenced by the sts holds this value
-// type of vars is resource.Quantity. ref: https://godoc.org/k8s.io/apimachinery/pkg/api/resource
-func getVolumeClaimTemplateSizes(sts object, nodeSpec *v1alpha1.DruidNodeSpec, pvc []object) (desVolumeClaimTemplateSize, currVolumeClaimTemplateSize, pvcSize []resource.Quantity) {
-
-	for i := range nodeSpec.VolumeClaimTemplates {
-		desVolumeClaimTemplateSize = append(desVolumeClaimTemplateSize, nodeSpec.VolumeClaimTemplates[i].Spec.Resources.Requests[v1.ResourceStorage])
-	}
-
-	for i := range sts.(*appsv1.StatefulSet).Spec.VolumeClaimTemplates {
-		currVolumeClaimTemplateSize = append(currVolumeClaimTemplateSize, sts.(*appsv1.StatefulSet).Spec.VolumeClaimTemplates[i].Spec.Resources.Requests[v1.ResourceStorage])
-	}
-
-	for i := range pvc {
-		pvcSize = append(pvcSize, pvc[i].(*v1.PersistentVolumeClaim).Spec.Resources.Requests[v1.ResourceStorage])
-	}
-
-	return desVolumeClaimTemplateSize, currVolumeClaimTemplateSize, pvcSize
-
-}
-
 func stringifyForLogging(obj object, drd *v1alpha1.Druid) string {
 	if bytes, err := json.Marshal(obj); err != nil {
 		logger.Error(err, err.Error(), fmt.Sprintf("Failed to serialize [%s:%s]", obj.GetObjectKind().GroupVersionKind().Kind, obj.GetName()), "name", drd.Name, "namespace", drd.Namespace)
@@ -1447,7 +1424,7 @@ func verifyDruidSpec(drd *v1alpha1.Druid) error {
 	if errorMsg == "" {
 		return nil
 	} else {
-		return fmt.Errorf(errorMsg)
+		return fmt.Errorf("%s", errorMsg)
 	}
 }
 
