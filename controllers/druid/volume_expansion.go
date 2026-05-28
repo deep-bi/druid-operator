@@ -85,7 +85,8 @@ func isVolumeExpansionEnabled(ctx context.Context, sdk client.Client, m *v1alpha
 			return false, err
 		}
 
-		if sc.(*storage.StorageClass).AllowVolumeExpansion != boolFalse() {
+		allowExpansion := sc.(*storage.StorageClass).AllowVolumeExpansion
+		if allowExpansion != nil && *allowExpansion {
 			return true, nil
 		}
 	}
@@ -93,6 +94,7 @@ func isVolumeExpansionEnabled(ctx context.Context, sdk client.Client, m *v1alpha
 }
 
 // scalePVCForSts shall expand the StatefulSet's VolumeClaimTemplates size as well as N no of pvc supported by the sts.
+// PVCs are correlated to their VCTs by name to avoid cross-VCT size mismatches.
 func scalePVCForSts(ctx context.Context, sdk client.Client, nodeSpec *v1alpha1.DruidNodeSpec, nodeSpecUniqueStr string, drd *v1alpha1.Druid, emitEvent EventEmitter) error {
 
 	getSTSList, err := readers.List(ctx, sdk, drd, makeLabelsForDruid(drd), emitEvent, func() objectList { return &appsv1.StatefulSetList{} }, func(listObj runtime.Object) []object {
@@ -109,7 +111,6 @@ func scalePVCForSts(ctx context.Context, sdk client.Client, nodeSpec *v1alpha1.D
 
 	// Dont proceed unless all statefulsets are up and running.
 	//  This can cause the go routine to panic
-
 	for _, sts := range getSTSList {
 		if sts.(*appsv1.StatefulSet).Status.Replicas != sts.(*appsv1.StatefulSet).Status.ReadyReplicas {
 			return nil
@@ -118,10 +119,12 @@ func scalePVCForSts(ctx context.Context, sdk client.Client, nodeSpec *v1alpha1.D
 
 	// return nil, in case return err the program halts since sts would not be able
 	// we would like the operator to create sts.
-	sts, err := readers.Get(ctx, sdk, nodeSpecUniqueStr, drd, func() object { return &appsv1.StatefulSet{} }, emitEvent)
+	stsObj, err := readers.Get(ctx, sdk, nodeSpecUniqueStr, drd, func() object { return &appsv1.StatefulSet{} }, emitEvent)
 	if err != nil {
 		return nil
 	}
+
+	statefulSet := stsObj.(*appsv1.StatefulSet)
 
 	pvcLabels := map[string]string{
 		"nodeSpecUniqueStr": nodeSpecUniqueStr,
@@ -139,63 +142,75 @@ func scalePVCForSts(ctx context.Context, sdk client.Client, nodeSpec *v1alpha1.D
 		return nil
 	}
 
-	desVolumeClaimTemplateSize, currVolumeClaimTemplateSize, pvcSize := getVolumeClaimTemplateSizes(sts, nodeSpec, pvcList)
-
-	// current number of PVC can't be less than desired number of pvc
-	if len(pvcSize) < len(desVolumeClaimTemplateSize) {
-		return nil
+	// Group PVCs by their VCT name so we only patch PVCs belonging to the correct VCT
+	pvcsByVCT := make(map[string][]*v1.PersistentVolumeClaim)
+	for _, pvcObj := range pvcList {
+		pvc := pvcObj.(*v1.PersistentVolumeClaim)
+		vctName := extractVCTNameFromPVC(pvc.Name, statefulSet.Name)
+		if vctName != "" {
+			pvcsByVCT[vctName] = append(pvcsByVCT[vctName], pvc)
+		}
 	}
 
-	// iterate over array for matching each index in desVolumeClaimTemplateSize, currVolumeClaimTemplateSize and pvcSize
-	for i := range desVolumeClaimTemplateSize {
+	// Build map of current STS VCTs by name
+	currentVCTMap := make(map[string]v1.PersistentVolumeClaim)
+	for _, vct := range statefulSet.Spec.VolumeClaimTemplates {
+		currentVCTMap[vct.Name] = vct
+	}
 
-		// Validate Request, shrinking of pvc not supported
-		// desired size cant be less than current size
-		// in that case re-create sts/pvc which is a user execute manual step
-		//
+	stsDeleted := false
+
+	for _, desiredVCT := range nodeSpec.VolumeClaimTemplates {
+		currentVCT, exists := currentVCTMap[desiredVCT.Name]
+		if !exists {
+			continue
+		}
+
+		desiredSize := desiredVCT.Spec.Resources.Requests[v1.ResourceStorage]
+		currentSize := currentVCT.Spec.Resources.Requests[v1.ResourceStorage]
+
 		// Use Cmp() instead of AsInt64() because AsInt64() fails for quantities
 		// with non-integer values like "2.2Ti" which are stored as milli-units.
-		desiredVsCurrent := desVolumeClaimTemplateSize[i].Cmp(currVolumeClaimTemplateSize[i])
+		desiredVsCurrent := desiredSize.Cmp(currentSize)
 
 		if desiredVsCurrent < 0 {
-			e := fmt.Errorf("Request for Shrinking of sts pvc size [sts:%s] in [namespace:%s] is not Supported", sts.(*appsv1.StatefulSet).Name, sts.(*appsv1.StatefulSet).Namespace)
+			e := fmt.Errorf("shrinking of sts pvc size [sts:%s] in [namespace:%s] for VCT [%s] is not supported",
+				statefulSet.Name, statefulSet.Namespace, desiredVCT.Name)
 			logger.Error(e, e.Error(), "name", drd.Name, "namespace", drd.Namespace)
-			emitEvent.EmitEventGeneric(drd, "DruidOperatorPvcReSizeFail", "", err)
+			emitEvent.EmitEventGeneric(drd, "DruidOperatorPvcReSizeFail", e.Error(), e)
 			return e
 		}
 
-		// In case size dont match and dessize > currsize, delete the sts using casacde=false / propagation policy set to orphan
-		// The operator on next reconcile shall create the sts with latest changes
-		if desiredVsCurrent != 0 {
-			msg := fmt.Sprintf("Detected Change in VolumeClaimTemplate Sizes for Statefuleset [%s] in Namespace [%s], desVolumeClaimTemplateSize: [%s], currVolumeClaimTemplateSize: [%s]\n, deleteing STS [%s] with casacde=false]", sts.(*appsv1.StatefulSet).Name, sts.(*appsv1.StatefulSet).Namespace, desVolumeClaimTemplateSize[i].String(), currVolumeClaimTemplateSize[i].String(), sts.(*appsv1.StatefulSet).Name)
+		// If desired size > current STS VCT size, delete STS with cascade=orphan.
+		// The operator on next reconcile shall create the STS with latest changes.
+		if desiredVsCurrent > 0 && !stsDeleted {
+			msg := fmt.Sprintf("Detected Change in VolumeClaimTemplate Sizes for StatefulSet [%s] in Namespace [%s], VCT [%s]: desired [%s], current [%s], deleting STS with cascade=orphan",
+				statefulSet.Name, statefulSet.Namespace, desiredVCT.Name, desiredSize.String(), currentSize.String())
 			logger.Info(msg)
 			emitEvent.EmitEventGeneric(drd, "DruidOperatorPvcReSizeDetected", msg, nil)
 
-			if err := writers.Delete(ctx, sdk, drd, sts, emitEvent, client.PropagationPolicy(metav1.DeletePropagationOrphan)); err != nil {
+			if err := writers.Delete(ctx, sdk, drd, stsObj, emitEvent, client.PropagationPolicy(metav1.DeletePropagationOrphan)); err != nil {
 				return err
-			} else {
-				msg := fmt.Sprintf("[StatefuleSet:%s] successfully deleted with casacde=false", sts.(*appsv1.StatefulSet).Name)
-				logger.Info(msg, "name", drd.Name, "namespace", drd.Namespace)
-				emitEvent.EmitEventGeneric(drd, "DruidOperatorStsOrphaned", msg, nil)
 			}
-
+			msg = fmt.Sprintf("[StatefulSet:%s] successfully deleted with cascade=orphan", statefulSet.Name)
+			logger.Info(msg, "name", drd.Name, "namespace", drd.Namespace)
+			emitEvent.EmitEventGeneric(drd, "DruidOperatorStsOrphaned", msg, nil)
+			stsDeleted = true
 		}
 
-		// In case size dont match, patch the pvc with the desiredsize from druid CR
-		for p := range pvcSize {
-			if desVolumeClaimTemplateSize[i].Cmp(pvcSize[p]) != 0 {
-				// use deepcopy
-				patch := client.MergeFrom(pvcList[p].(*v1.PersistentVolumeClaim).DeepCopy())
-				pvcList[p].(*v1.PersistentVolumeClaim).Spec.Resources.Requests[v1.ResourceStorage] = desVolumeClaimTemplateSize[i]
-				if err := writers.Patch(ctx, sdk, drd, pvcList[p].(*v1.PersistentVolumeClaim), false, patch, emitEvent); err != nil {
+		// Expand only PVCs belonging to this VCT (never shrink)
+		for _, pvc := range pvcsByVCT[desiredVCT.Name] {
+			pvcSize := pvc.Spec.Resources.Requests[v1.ResourceStorage]
+			if desiredSize.Cmp(pvcSize) > 0 {
+				patch := client.MergeFrom(pvc.DeepCopy())
+				pvc.Spec.Resources.Requests[v1.ResourceStorage] = desiredSize
+				if err := writers.Patch(ctx, sdk, drd, pvc, false, patch, emitEvent); err != nil {
 					return err
-				} else {
-					msg := fmt.Sprintf("[PVC:%s] successfully Patched with [Size:%s]", pvcList[p].(*v1.PersistentVolumeClaim).Name, desVolumeClaimTemplateSize[i].String())
-					logger.Info(msg, "name", drd.Name, "namespace", drd.Namespace)
 				}
+				msg := fmt.Sprintf("[PVC:%s] successfully Patched with [Size:%s]", pvc.Name, desiredSize.String())
+				logger.Info(msg, "name", drd.Name, "namespace", drd.Namespace)
 			}
 		}
-
 	}
 
 	return nil
